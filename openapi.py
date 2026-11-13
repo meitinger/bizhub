@@ -27,15 +27,8 @@ class OpenAPIError(RuntimeError):
             xml.etree.ElementTree.indent(self.data)
             additional = xml.etree.ElementTree.tostring(self.data, encoding="unicode")
         else:
-            additional = str(self.data)
+            additional = str(self.data or "")
         return f"{super().__str__()}\n{additional}\n"
-
-
-class _OpenAPIRequestItem(typing.TypedDict):
-    action: str
-    request_item: typing.NotRequired[str]
-    readonly: typing.NotRequired[typing.Literal[True]]
-    element: typing.NotRequired[str]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -47,11 +40,27 @@ class OpenAPISetting:
     element: str | typing.Literal["*"]
 
 
+class _Args(argparse.Namespace):
+    openapi: str
+    config: pathlib.Path | None
+    insecure: bool
+    filter: list[str]
+    password: str | None
+
+
+class _RequestItem(typing.TypedDict):
+    action: str
+    request_item: typing.NotRequired[str]
+    readonly: typing.NotRequired[typing.Literal[True]]
+    element: typing.NotRequired[str]
+
+
 SOAP_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/"
 OPENAPI_VERSION_MAJOR = 7
 OPENAPI_VERSION_MINOR = 34
 OPENAPI_NAMESPACE = f"http://www.konicaminolta.com/service/OpenAPI-{OPENAPI_VERSION_MAJOR}-{OPENAPI_VERSION_MINOR}"
-_OPENAPI_REQUEST_ITEMS: dict[str, _OpenAPIRequestItem] = {
+
+_REQUEST_ITEMS: dict[str, _RequestItem] = {
     # Browser
     "BrowserBookmark": {
         "action": "BrowserSetting",
@@ -84,10 +93,7 @@ _OPENAPI_REQUEST_ITEMS: dict[str, _OpenAPIRequestItem] = {
         "element": "ConsumableList",
     },
     "ExpansionNetwork": {"action": "DeviceInfoDetail"},
-    "Fax": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
+    "Fax": {"action": "DeviceInfoDetail"},
     "Filtering": {"action": "DeviceInfoDetail"},
     "FtpClient": {"action": "DeviceInfoDetail"},
     "Ftpd": {"action": "DeviceInfoDetail"},
@@ -229,7 +235,7 @@ _OPENAPI_REQUEST_ITEMS: dict[str, _OpenAPIRequestItem] = {
     "UbiquitousPrint": {"action": "DevicePermanentSetting"},
     "WeeklyTimer": {"action": "DevicePermanentSetting"},
 }
-_OPENAPI_SETTINGS: dict[str, OpenAPISetting] = {
+_SETTINGS: dict[str, OpenAPISetting] = {
     name: OpenAPISetting(
         name=name,
         action=item["action"],
@@ -237,16 +243,8 @@ _OPENAPI_SETTINGS: dict[str, OpenAPISetting] = {
         readonly=item.get("readonly", False),
         element=item.get("element", item.get("request_item", name)),
     )
-    for (name, item) in _OPENAPI_REQUEST_ITEMS.items()
+    for (name, item) in _REQUEST_ITEMS.items()
 }
-
-
-class _Args(argparse.Namespace):
-    openapi: str
-    config: pathlib.Path | None
-    insecure: bool
-    filter: list[str]
-    password: str | None
 
 
 class OpenAPI:
@@ -266,7 +264,7 @@ class OpenAPI:
         parser.add_argument(
             "--filter",
             nargs="+",
-            choices=_OPENAPI_SETTINGS.keys(),
+            choices=_SETTINGS.keys(),
             help="settings to handle (default: all)",
         )
         parser.add_argument("--password", help="admin password (default: prompt)")
@@ -311,17 +309,15 @@ class OpenAPI:
 
     def settings(self) -> typing.Iterable[OpenAPISetting]:
         if not self.filter:
-            return _OPENAPI_SETTINGS.values()
+            return _SETTINGS.values()
         return (
-            setting
-            for setting in _OPENAPI_SETTINGS.values()
-            if setting.name in self.filter
+            setting for setting in _SETTINGS.values() if setting.name in self.filter
         )
 
     def setting_by_name(self, name: str) -> OpenAPISetting | None:
         if self.filter and name not in self.filter:
             return None
-        return _OPENAPI_SETTINGS.get(name)
+        return _SETTINGS.get(name)
 
     def read_config(self) -> xml.etree.ElementTree.Element:
         return xml.etree.ElementTree.fromstring(
