@@ -3,12 +3,12 @@ import sys
 import xml.etree.ElementTree
 
 if __name__ == "__main__":
-    api = openapi.OpenAPI()
+    api = openapi.OpenAPI(**openapi.parse_args())
     config = api.read_config()
     with api.authenticate():
         with api.lock():
             for element in config:
-                setting = api.setting_by_name(element.tag)
+                setting = api.get_setting(element.tag)
                 if setting is None or setting.readonly:
                     continue
                 try:
@@ -34,4 +34,4 @@ if __name__ == "__main__":
                         file=sys.stderr,
                     )
                 else:
-                    print(f"Set{setting.action}_{setting.request_item}: OK")
+                    print(setting.name)

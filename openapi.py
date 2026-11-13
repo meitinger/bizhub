@@ -12,6 +12,11 @@ import urllib.request
 import xml.etree.ElementTree
 from xml.sax.saxutils import escape
 
+SOAP_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/"
+OPENAPI_VERSION_MAJOR = 7
+OPENAPI_VERSION_MINOR = 34
+OPENAPI_NAMESPACE = f"http://www.konicaminolta.com/service/OpenAPI-{OPENAPI_VERSION_MAJOR}-{OPENAPI_VERSION_MINOR}"
+
 
 class OpenAPIError(RuntimeError):
     def __init__(
@@ -21,6 +26,7 @@ class OpenAPIError(RuntimeError):
         self.data = data
 
     def __str__(self) -> str:
+        message = super().__str__()
         if isinstance(self.data, bytes):
             additional = self.data.decode("utf-8", errors="replace")
         elif isinstance(self.data, xml.etree.ElementTree.Element):
@@ -28,10 +34,10 @@ class OpenAPIError(RuntimeError):
             additional = xml.etree.ElementTree.tostring(self.data, encoding="unicode")
         else:
             additional = str(self.data or "")
-        return f"{super().__str__()}\n{additional}\n"
+        return f"{message}\n{additional}" if additional else message
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, order=True)
 class OpenAPISetting:
     name: str
     action: str
@@ -40,237 +46,52 @@ class OpenAPISetting:
     element: str | typing.Literal["*"]
 
 
-class _Args(argparse.Namespace):
-    openapi: str
-    config: pathlib.Path | None
-    insecure: bool
-    filter: list[str]
-    password: str | None
+class OpenAPIArguments(typing.TypedDict):
+    url: str
+    config: typing.NotRequired[pathlib.Path]
+    insecure: typing.NotRequired[bool]
+    filter: typing.NotRequired[typing.Iterable[str]]
+    password: str
 
 
-class _RequestItem(typing.TypedDict):
-    action: str
-    request_item: typing.NotRequired[str]
-    readonly: typing.NotRequired[typing.Literal[True]]
-    element: typing.NotRequired[str]
-
-
-SOAP_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/"
-OPENAPI_VERSION_MAJOR = 7
-OPENAPI_VERSION_MINOR = 34
-OPENAPI_NAMESPACE = f"http://www.konicaminolta.com/service/OpenAPI-{OPENAPI_VERSION_MAJOR}-{OPENAPI_VERSION_MINOR}"
-
-_REQUEST_ITEMS: dict[str, _RequestItem] = {
-    # Browser
-    "BrowserBookmark": {
-        "action": "BrowserSetting",
-        "request_item": "Bookmark",
-        "element": "Bookmarklist",
-    },
-    "BrowserContent": {
-        "action": "BrowserSetting",
-        "request_item": "ContentSetting",
-    },
-    "BrowserOperation": {
-        "action": "BrowserSetting",
-        "request_item": "OperationSetting",
-    },
-    # DeviceInfoDetail
-    "AirPrint": {"action": "DeviceInfoDetail"},
-    "AppleTalk": {"action": "DeviceInfoDetail"},
-    "Bmlinks": {
-        "action": "DeviceInfoDetail",
-        "element": "BmlinksSetting",
-    },
-    "Bonjour": {"action": "DeviceInfoDetail"},
-    "CertificateVerification": {
-        "action": "DeviceInfoDetail",
-        "element": "CertificateVerificationSetting",
-    },
-    "Consumable": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-        "element": "ConsumableList",
-    },
-    "ExpansionNetwork": {"action": "DeviceInfoDetail"},
-    "Fax": {"action": "DeviceInfoDetail"},
-    "Filtering": {"action": "DeviceInfoDetail"},
-    "FtpClient": {"action": "DeviceInfoDetail"},
-    "Ftpd": {"action": "DeviceInfoDetail"},
-    "FwRollback": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
-    "Http": {"action": "DeviceInfoDetail"},
-    "Ieee8021x": {"action": "DeviceInfoDetail"},
-    "Iisw": {"action": "DeviceInfoDetail"},
-    "Input": {"action": "DeviceInfoDetail"},
-    "Ipp": {"action": "DeviceInfoDetail"},
-    "Ldap": {"action": "DeviceInfoDetail"},
-    "Lpr": {"action": "DeviceInfoDetail"},
-    "MailReceive": {"action": "DeviceInfoDetail"},
-    "MailReceiveSmtp": {"action": "DeviceInfoDetail"},
-    "MailSend": {"action": "DeviceInfoDetail"},
-    "Marker": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
-    "MarketArea": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-        "element": "*",
-    },
-    "MediaPath": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
-    "Netware": {"action": "DeviceInfoDetail"},
-    "NetworkFax": {"action": "DeviceInfoDetail"},
-    "Ntp": {"action": "DeviceInfoDetail"},
-    "Odh": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
-    "OpenApi": {"action": "DeviceInfoDetail"},
-    "Output": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
-    "PdlInfoList": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
-    "PhysicalInterface": {
-        "action": "DeviceInfoDetail",
-        "element": "Physical",
-    },
-    "RawPort": {"action": "DeviceInfoDetail"},
-    "RemoteFwUpdate": {"action": "DeviceInfoDetail"},
-    "ReportPrintList": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
-    "Sensor": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
-    "Slp": {"action": "DeviceInfoDetail"},
-    "Smime": {"action": "DeviceInfoDetail"},
-    "Snmp": {"action": "DeviceInfoDetail"},
-    "Ssdp": {
-        "action": "DeviceInfoDetail",
-        "element": "SsdpSetting",
-    },
-    "Storage": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-    },
-    "System": {"action": "DeviceInfoDetail"},
-    "SystemConnection": {"action": "DeviceInfoDetail"},
-    "TcpipGeneral": {"action": "DeviceInfoDetail"},
-    "TcpSocket": {"action": "DeviceInfoDetail"},
-    "Version": {
-        "action": "DeviceInfoDetail",
-        "readonly": True,
-        "element": "VersionList",
-    },
-    "VLAN": {"action": "DeviceInfoDetail"},
-    "WebDav": {
-        "action": "DeviceInfoDetail",
-        "element": "WebDavSetting",
-    },
-    "WebService": {
-        "action": "DeviceInfoDetail",
-        "element": "WebServiceSetting",
-    },
-    "WindowsNetwork": {"action": "DeviceInfoDetail"},
-    # DevicePermanentSetting
-    "AcquirePermission": {"action": "DevicePermanentSetting"},
-    "Admin": {"action": "DevicePermanentSetting"},
-    "AdminMyPanel": {"action": "DevicePermanentSetting"},
-    "Alert": {"action": "DevicePermanentSetting"},
-    "AuthDevice": {"action": "DevicePermanentSetting"},
-    "Authentication": {
-        "action": "DevicePermanentSetting",
-        "element": "AuthSetting",
-    },
-    "Box": {"action": "DevicePermanentSetting"},
-    "CloudConnection": {"action": "DevicePermanentSetting"},
-    "CommonPaperHandling": {"action": "DevicePermanentSetting"},
-    "Copy": {"action": "DevicePermanentSetting"},
-    "Counter": {"action": "DevicePermanentSetting"},
-    "CounterReport": {"action": "DevicePermanentSetting"},
-    "CustomPanel": {"action": "DevicePermanentSetting"},
-    "CustomPaper": {"action": "DevicePermanentSetting"},
-    "DateTime": {"action": "DevicePermanentSetting"},
-    "ExpertAdjust": {"action": "DevicePermanentSetting"},
-    "Fax": {"action": "DevicePermanentSetting"},
-    "HeaderFooter": {"action": "DevicePermanentSetting"},
-    "HeaderFooterForPanel": {"action": "DevicePermanentSetting"},
-    "Ifax": {"action": "DevicePermanentSetting"},
-    "InternalWebServer": {"action": "DevicePermanentSetting"},
-    "LightPanelTopMenu": {"action": "DevicePermanentSetting"},
-    "MfpService": {"action": "DevicePermanentSetting"},
-    "Network": {"action": "DevicePermanentSetting"},
-    "NetworkFax": {"action": "DevicePermanentSetting"},
-    "OperationLevel": {"action": "DevicePermanentSetting"},
-    "Panel": {"action": "DevicePermanentSetting"},
-    "PanelTopMenu": {"action": "DevicePermanentSetting"},
-    "Power": {"action": "DevicePermanentSetting"},
-    "Print": {"action": "DevicePermanentSetting"},
-    "Pswc": {"action": "DevicePermanentSetting"},
-    "ReferLicence": {"action": "DevicePermanentSetting"},
-    "Scan": {"action": "DevicePermanentSetting"},
-    "SearchOption": {"action": "DevicePermanentSetting"},
-    "Security": {"action": "DevicePermanentSetting"},
-    "SingleSignOnDomain": {"action": "DevicePermanentSetting"},
-    "SingleSignOnService": {"action": "DevicePermanentSetting"},
-    "SIPSetting": {"action": "DevicePermanentSetting"},
-    "Size": {"action": "DevicePermanentSetting"},
-    "System": {"action": "DevicePermanentSetting"},
-    "Tsi": {
-        "action": "DevicePermanentSetting",
-        "element": "TsiConfiguration",
-    },
-    "UbiquitousPrint": {"action": "DevicePermanentSetting"},
-    "WeeklyTimer": {"action": "DevicePermanentSetting"},
-}
-_SETTINGS: dict[str, OpenAPISetting] = {
-    name: OpenAPISetting(
-        name=name,
-        action=item["action"],
-        request_item=item.get("request_item", name),
-        readonly=item.get("readonly", False),
-        element=item.get("element", item.get("request_item", name)),
+def parse_args() -> OpenAPIArguments:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("url", help="OpenAPI URL")
+    parser.add_argument(
+        "--config",
+        type=pathlib.Path,
+        help="configuration XML file path (default: stdio)",
     )
-    for (name, item) in _REQUEST_ITEMS.items()
-}
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="turn off SSL verification (default: on)",
+    )
+    parser.add_argument(
+        "--filter",
+        nargs="+",
+        help="settings to handle (default: all)",
+    )
+    parser.add_argument("--password", help="admin password (default: prompt)")
+    args = parser.parse_args()
+    result: OpenAPIArguments = {
+        "url": args.url,
+        "insecure": args.insecure,
+        "password": (
+            getpass.getpass("Password: ") if args.password is None else args.password
+        ),
+    }
+    if args.filter:
+        result["filter"] = frozenset(args.filter)
+    if args.config is not None:
+        result["config"] = args.config
+    return result
 
 
 class OpenAPI:
-    def __init__(self):
-        parser = argparse.ArgumentParser()
-        parser.add_argument("openapi", help="OpenAPI URL")
-        parser.add_argument(
-            "--config",
-            type=pathlib.Path,
-            help="configuration XML file path (default: stdio)",
-        )
-        parser.add_argument(
-            "--insecure",
-            action="store_true",
-            help="turn off SSL verification (default: on)",
-        )
-        parser.add_argument(
-            "--filter",
-            nargs="+",
-            choices=_SETTINGS.keys(),
-            help="settings to handle (default: all)",
-        )
-        parser.add_argument("--password", help="admin password (default: prompt)")
-        args = parser.parse_args(namespace=_Args())
+    def __init__(self, **args: typing.Unpack[OpenAPIArguments]):
         try:
-            parts = urllib.parse.urlsplit(args.openapi)
+            parts = urllib.parse.urlsplit(args["url"])
         except ValueError as error:
             raise ValueError(f"OpenAPI URL is invalid: {error}") from error
         if parts.scheme not in {"http", "https"}:
@@ -281,43 +102,254 @@ class OpenAPI:
         netloc = f"[{hostname}]" if ":" in hostname else hostname
         if parts.port is not None:
             netloc = f"{netloc}:{parts.port}"
-        self.url = urllib.parse.urlunsplit(
-            (
-                parts.scheme,
-                netloc,
-                parts.path,
-                parts.query,
-                "",
-            )
-        )
-        self.username = urllib.parse.unquote(parts.username or "")
-        self.password = urllib.parse.unquote(parts.password or "")
-        self.admin_password = (
-            getpass.getpass("Password: ") if args.password is None else args.password
-        )
-        if args.insecure:
+        if args.get("insecure", False):
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
         else:
             ssl_context = None
-        self.config = args.config
-        self.filter = args.filter
-        self.ssl_context = ssl_context
+        self._settings: typing.Final = dict[str, OpenAPISetting]()
+        self.url: typing.Final = urllib.parse.urlunsplit(
+            (parts.scheme, netloc, parts.path, parts.query, "")
+        )
+        self.username: typing.Final = urllib.parse.unquote(parts.username or "")
+        self.password: typing.Final = urllib.parse.unquote(parts.password or "")
+        self.admin_password: typing.Final = args["password"]
+        self.config: typing.Final = args.get("config")
+        self.filter: typing.Final = frozenset(args.get("filter", ()))
+        self.ssl_context: typing.Final = ssl_context
         self.auth_key: str | None = None
         self.lock_key: str | None = None
+        self._register_default_settings()
 
-    def settings(self) -> typing.Iterable[OpenAPISetting]:
-        if not self.filter:
-            return _SETTINGS.values()
-        return (
-            setting for setting in _SETTINGS.values() if setting.name in self.filter
+    def _register_default_settings(self) -> None:
+        for simple_device_info_detail in (
+            "AirPrint",
+            "AppleTalk",
+            "Bonjour",
+            "ExpansionNetwork",
+            "Fax",
+            "Filtering",
+            "FtpClient",
+            "Ftpd",
+            "Http",
+            "Ieee8021x",
+            "Iisw",
+            "Input",
+            "Ipp",
+            "Ldap",
+            "Lpr",
+            "MailReceive",
+            "MailReceiveSmtp",
+            "MailSend",
+            "Netware",
+            "NetworkFax",
+            "Ntp",
+            "OpenApi",
+            "RawPort",
+            "RemoteFwUpdate",
+            "Slp",
+            "Smime",
+            "Snmp",
+            "System",
+            "SystemConnection",
+            "TcpipGeneral",
+            "TcpSocket",
+            "VLAN",
+            "WindowsNetwork",
+        ):
+            self.register_setting(
+                OpenAPISetting(
+                    name=simple_device_info_detail,
+                    action="DeviceInfoDetail",
+                    request_item=simple_device_info_detail,
+                    readonly=False,
+                    element=simple_device_info_detail,
+                )
+            )
+        for readonly_device_info_detail in (
+            "FwRollback",
+            "Marker",
+            "MediaPath",
+            "Odh",
+            "Output",
+            "PdlInfoList",
+            "ReportPrintList",
+            "Sensor",
+            "Storage",
+        ):
+            self.register_setting(
+                OpenAPISetting(
+                    name=readonly_device_info_detail,
+                    action="DeviceInfoDetail",
+                    request_item=readonly_device_info_detail,
+                    readonly=True,
+                    element=readonly_device_info_detail,
+                )
+            )
+        for setting_device_info_detail in (
+            "Bmlinks",
+            "CertificateVerification",
+            "Ssdp",
+            "WebDav",
+            "WebService",
+        ):
+            self.register_setting(
+                OpenAPISetting(
+                    name=setting_device_info_detail,
+                    action="DeviceInfoDetail",
+                    request_item=setting_device_info_detail,
+                    readonly=False,
+                    element=f"{setting_device_info_detail}Setting",
+                )
+            )
+        for readonly_list_device_info_detail in ("Consumable", "Version"):
+            self.register_setting(
+                OpenAPISetting(
+                    name=readonly_list_device_info_detail,
+                    action="DeviceInfoDetail",
+                    request_item=readonly_list_device_info_detail,
+                    readonly=True,
+                    element=f"{readonly_list_device_info_detail}List",
+                )
+            )
+        self.register_setting(
+            OpenAPISetting(
+                name="MarketArea",
+                action="DeviceInfoDetail",
+                request_item="MarketArea",
+                readonly=True,
+                element="*",
+            )
+        )
+        self.register_setting(
+            OpenAPISetting(
+                name="PhysicalInterface",
+                action="DeviceInfoDetail",
+                request_item="PhysicalInterface",
+                readonly=False,
+                element="Physical",
+            )
+        )
+        for simple_device_permanent_setting in (
+            "AcquirePermission",
+            "Admin",
+            "AdminMyPanel",
+            "Alert",
+            "AuthDevice",
+            "Box",
+            "CloudConnection",
+            "CommonPaperHandling",
+            "Copy",
+            "Counter",
+            "CounterReport",
+            "CustomPanel",
+            "CustomPaper",
+            "DateTime",
+            "ExpertAdjust",
+            "HeaderFooter",
+            "HeaderFooterForPanel",
+            "Ifax",
+            "InternalWebServer",
+            "LightPanelTopMenu",
+            "MfpService",
+            "Network",
+            "OperationLevel",
+            "Panel",
+            "PanelTopMenu",
+            "Power",
+            "Print",
+            "Pswc",
+            "ReferLicence",
+            "Scan",
+            "SearchOption",
+            "Security",
+            "SingleSignOnDomain",
+            "SingleSignOnService",
+            "SIPSetting",
+            "Size",
+            "UbiquitousPrint",
+            "WeeklyTimer",
+        ):
+            self.register_setting(
+                OpenAPISetting(
+                    name=simple_device_permanent_setting,
+                    action="DevicePermanentSetting",
+                    request_item=simple_device_permanent_setting,
+                    readonly=False,
+                    element=simple_device_permanent_setting,
+                )
+            )
+        for duplicate_device_permanent_setting in ("Fax", "NetworkFax", "System"):
+            self.register_setting(
+                OpenAPISetting(
+                    name=f"{duplicate_device_permanent_setting}Setting",
+                    action="DevicePermanentSetting",
+                    request_item=duplicate_device_permanent_setting,
+                    readonly=False,
+                    element=duplicate_device_permanent_setting,
+                )
+            )
+        self.register_setting(
+            OpenAPISetting(
+                name="Authentication",
+                action="DevicePermanentSetting",
+                request_item="Authentication",
+                readonly=False,
+                element="AuthSetting",
+            )
+        )
+        self.register_setting(
+            OpenAPISetting(
+                name="Tsi",
+                action="DevicePermanentSetting",
+                request_item="Tsi",
+                readonly=False,
+                element="TsiConfiguration",
+            )
+        )
+        self.register_setting(
+            OpenAPISetting(
+                name="Bookmark",
+                action="BrowserSetting",
+                request_item="Bookmark",
+                readonly=False,
+                element="Bookmarklist",
+            )
+        )
+        self.register_setting(
+            OpenAPISetting(
+                name="BrowserContent",
+                action="BrowserSetting",
+                request_item="ContentSetting",
+                readonly=False,
+                element="ContentSetting",
+            )
+        )
+        self.register_setting(
+            OpenAPISetting(
+                name="BrowserOperation",
+                action="BrowserSetting",
+                request_item="OperationSetting",
+                readonly=False,
+                element="OperationSetting",
+            )
         )
 
-    def setting_by_name(self, name: str) -> OpenAPISetting | None:
+    def enum_settings(self) -> typing.Iterable[OpenAPISetting]:
+        for setting in sorted(self._settings.values()):
+            if not self.filter or setting.name in self.filter:
+                yield setting
+
+    def get_setting(self, name: str) -> OpenAPISetting | None:
         if self.filter and name not in self.filter:
             return None
-        return _SETTINGS.get(name)
+        return self._settings.get(name)
+
+    def register_setting(self, setting: OpenAPISetting) -> None:
+        if setting.name in self._settings:
+            raise ValueError(f"setting '{setting.name}' already registered")
+        self._settings[setting.name] = setting
 
     def read_config(self) -> xml.etree.ElementTree.Element:
         return xml.etree.ElementTree.fromstring(
@@ -452,7 +484,7 @@ class OpenAPI:
         return response_node
 
     @contextlib.contextmanager
-    def authenticate(self):
+    def authenticate(self) -> typing.Generator[None]:
         if self.auth_key is not None:
             raise RuntimeError("OpenAPI already authenticated")
         response = self.request(
@@ -464,13 +496,13 @@ class OpenAPI:
             raise OpenAPIError("AuthKey missing in response", response)
         self.auth_key = auth_key
         try:
-            yield None
+            yield
         finally:
             self.request("Logout")
             self.auth_key = None
 
     @contextlib.contextmanager
-    def lock(self):
+    def lock(self) -> typing.Generator[None]:
         if self.lock_key is not None:
             raise RuntimeError("OpenAPI already locked")
         response = self.request(
@@ -482,7 +514,7 @@ class OpenAPI:
             raise OpenAPIError("LockKey missing in response", response)
         self.lock_key = lock_key
         try:
-            yield None
+            yield
         finally:
             self.request("ExitDeviceLock")
             self.lock_key = None

@@ -3,10 +3,10 @@ import sys
 import xml.etree.ElementTree
 
 if __name__ == "__main__":
-    api = openapi.OpenAPI()
+    api = openapi.OpenAPI(**openapi.parse_args())
     config = xml.etree.ElementTree.Element("Configuration")
     with api.authenticate():
-        for setting in api.settings():
+        for setting in api.enum_settings():
             try:
                 element = xml.etree.ElementTree.Element(setting.name)
                 config.append(element)
