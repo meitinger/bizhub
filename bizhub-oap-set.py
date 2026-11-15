@@ -12,7 +12,7 @@ if __name__ == "__main__":
                 if setting is None or setting.readonly:
                     continue
                 try:
-                    if setting.element == "*":
+                    if not isinstance(setting.element, str) or setting.element == "*":
                         payload = "".join(
                             xml.etree.ElementTree.tostring(child, encoding="unicode")
                             for child in element
@@ -26,7 +26,7 @@ if __name__ == "__main__":
                         f"Set{setting.action}",
                         request_item=setting.request_item,
                         include_backup=True,
-                        payload=payload,
+                        payload=payload + setting.payload,
                     )
                 except openapi.OpenAPIError as error:
                     print(

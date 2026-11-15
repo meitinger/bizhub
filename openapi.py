@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import copy
 import dataclasses
 import getpass
 import pathlib
@@ -23,27 +24,29 @@ class OpenAPIError(RuntimeError):
         self, msg: str, data: bytes | xml.etree.ElementTree.Element | None = None
     ) -> None:
         super().__init__(msg)
-        self.data = data
+        self.data: typing.Final = data
 
     def __str__(self) -> str:
         message = super().__str__()
         if isinstance(self.data, bytes):
             additional = self.data.decode("utf-8", errors="replace")
         elif isinstance(self.data, xml.etree.ElementTree.Element):
-            xml.etree.ElementTree.indent(self.data)
-            additional = xml.etree.ElementTree.tostring(self.data, encoding="unicode")
+            clone = copy.deepcopy(self.data)
+            xml.etree.ElementTree.indent(clone)
+            additional = xml.etree.ElementTree.tostring(clone, encoding="unicode")
         else:
             additional = str(self.data or "")
         return f"{message}\n{additional}" if additional else message
 
 
-@dataclasses.dataclass(frozen=True, order=True)
+@dataclasses.dataclass(frozen=True, order=True, kw_only=True)
 class OpenAPISetting:
     name: str
     action: str
-    request_item: str
-    readonly: bool
-    element: str | typing.Literal["*"]
+    request_item: str | None
+    element: str | typing.Iterable[str] | typing.Literal["*"]
+    readonly: bool = False
+    payload: str = ""
 
 
 class OpenAPIArguments(typing.TypedDict):
@@ -163,7 +166,6 @@ class OpenAPI:
                     name=simple_device_info_detail,
                     action="DeviceInfoDetail",
                     request_item=simple_device_info_detail,
-                    readonly=False,
                     element=simple_device_info_detail,
                 )
             )
@@ -183,8 +185,8 @@ class OpenAPI:
                     name=readonly_device_info_detail,
                     action="DeviceInfoDetail",
                     request_item=readonly_device_info_detail,
-                    readonly=True,
                     element=readonly_device_info_detail,
+                    readonly=True,
                 )
             )
         for setting_device_info_detail in (
@@ -199,7 +201,6 @@ class OpenAPI:
                     name=setting_device_info_detail,
                     action="DeviceInfoDetail",
                     request_item=setting_device_info_detail,
-                    readonly=False,
                     element=f"{setting_device_info_detail}Setting",
                 )
             )
@@ -209,8 +210,8 @@ class OpenAPI:
                     name=readonly_list_device_info_detail,
                     action="DeviceInfoDetail",
                     request_item=readonly_list_device_info_detail,
-                    readonly=True,
                     element=f"{readonly_list_device_info_detail}List",
+                    readonly=True,
                 )
             )
         self.register_setting(
@@ -218,8 +219,8 @@ class OpenAPI:
                 name="MarketArea",
                 action="DeviceInfoDetail",
                 request_item="MarketArea",
-                readonly=True,
                 element="*",
+                readonly=True,
             )
         )
         self.register_setting(
@@ -227,7 +228,6 @@ class OpenAPI:
                 name="PhysicalInterface",
                 action="DeviceInfoDetail",
                 request_item="PhysicalInterface",
-                readonly=False,
                 element="Physical",
             )
         )
@@ -276,7 +276,6 @@ class OpenAPI:
                     name=simple_device_permanent_setting,
                     action="DevicePermanentSetting",
                     request_item=simple_device_permanent_setting,
-                    readonly=False,
                     element=simple_device_permanent_setting,
                 )
             )
@@ -286,7 +285,6 @@ class OpenAPI:
                     name=f"{duplicate_device_permanent_setting}Setting",
                     action="DevicePermanentSetting",
                     request_item=duplicate_device_permanent_setting,
-                    readonly=False,
                     element=duplicate_device_permanent_setting,
                 )
             )
@@ -295,7 +293,6 @@ class OpenAPI:
                 name="Authentication",
                 action="DevicePermanentSetting",
                 request_item="Authentication",
-                readonly=False,
                 element="AuthSetting",
             )
         )
@@ -304,7 +301,6 @@ class OpenAPI:
                 name="Tsi",
                 action="DevicePermanentSetting",
                 request_item="Tsi",
-                readonly=False,
                 element="TsiConfiguration",
             )
         )
@@ -313,7 +309,6 @@ class OpenAPI:
                 name="Bookmark",
                 action="BrowserSetting",
                 request_item="Bookmark",
-                readonly=False,
                 element="Bookmarklist",
             )
         )
@@ -322,7 +317,6 @@ class OpenAPI:
                 name="BrowserContent",
                 action="BrowserSetting",
                 request_item="ContentSetting",
-                readonly=False,
                 element="ContentSetting",
             )
         )
@@ -331,10 +325,61 @@ class OpenAPI:
                 name="BrowserOperation",
                 action="BrowserSetting",
                 request_item="OperationSetting",
-                readonly=False,
                 element="OperationSetting",
             )
         )
+        self.register_setting(
+            OpenAPISetting(
+                name="WebBrowser",
+                action="WebBrowser",
+                request_item=None,
+                element="EnableWebBrowser",
+            )
+        )
+        self.register_setting(
+            OpenAPISetting(
+                name="PrinterEncryptionSetting",
+                action="PrinterEncryptionSetting",
+                request_item=None,
+                element="PrinterEncryptionSetting",
+            )
+        )
+        self.register_setting(
+            OpenAPISetting(
+                name="PanelPatternSetting",
+                action="PanelPatternSetting",
+                request_item=None,
+                element="PatternSetting",
+            )
+        )
+        self.register_setting(
+            OpenAPISetting(
+                name="CustomApplicationSetting",
+                action="CustomApplicationSetting",
+                request_item=None,
+                element=("ButtonName", "FaxDefaultApplication"),
+            )
+        )
+        self.register_setting(
+            OpenAPISetting(
+                name="BoxConfiguration",
+                action="BoxConfiguration",
+                request_item=None,
+                element="BoxConfiguration",
+                readonly=True,
+            )
+        )
+        for kind in ("Public", "User"):
+            self.register_setting(
+                OpenAPISetting(
+                    name=f"{kind}AbbrConfiguration",
+                    action="AbbrConfiguration",
+                    request_item=None,
+                    element=("Abbr", "GroupAbbr"),
+                    payload=f"<AddressKind>{kind}</AddressKind>",
+                    readonly=True,
+                )
+            )
 
     def enum_settings(self) -> typing.Iterable[OpenAPISetting]:
         for setting in sorted(self._settings.values()):
@@ -435,9 +480,7 @@ class OpenAPI:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(
-                request, context=self.ssl_context, timeout=60
-            ) as response:
+            with urllib.request.urlopen(request, context=self.ssl_context) as response:
                 response_body = response.read()
         except urllib.error.HTTPError as error:
             error_body = error.read()
