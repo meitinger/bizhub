@@ -44,7 +44,7 @@ class OpenAPISetting:
     name: str
     action: str
     request_item: str | None
-    element: str | typing.Iterable[str] | typing.Literal["*"]
+    element: str | typing.Iterable[str]
     readonly: bool = False
     payload: str = ""
 
@@ -55,6 +55,7 @@ class OpenAPIArguments(typing.TypedDict):
     insecure: typing.NotRequired[bool]
     filter: typing.NotRequired[typing.Iterable[str]]
     password: str
+    additional_settings: typing.NotRequired[typing.Iterable[OpenAPISetting]]
 
 
 def parse_args() -> OpenAPIArguments:
@@ -95,23 +96,37 @@ class OpenAPI:
     def __init__(self, **args: typing.Unpack[OpenAPIArguments]):
         try:
             parts = urllib.parse.urlsplit(args["url"])
+            hostname = parts.hostname
+            port = parts.port
         except ValueError as error:
             raise ValueError(f"OpenAPI URL is invalid: {error}") from error
         if parts.scheme not in {"http", "https"}:
-            raise ValueError(f"unsupported OpenAPI URL scheme: {parts.scheme!r}")
-        hostname = parts.hostname
+            raise ValueError(f"unsupported OpenAPI URL scheme: {parts.scheme}")
         if hostname is None:
             raise ValueError("OpenAPI URL is missing a hostname")
         netloc = f"[{hostname}]" if ":" in hostname else hostname
-        if parts.port is not None:
-            netloc = f"{netloc}:{parts.port}"
+        if port is not None:
+            netloc = f"{netloc}:{port}"
         if args.get("insecure", False):
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
         else:
             ssl_context = None
-        self._settings: typing.Final = dict[str, OpenAPISetting]()
+        self.settings: typing.Final = dict[str, OpenAPISetting]()
+        for settings in (
+            self.browser_settings,
+            self.configuration_settings,
+            self.device_info_detail_settings,
+            self.device_permanent_settings,
+            self.other_settings,
+            args.get("additional_settings", ()),
+        ):
+            for setting in settings:
+                name_ignore_case = setting.name.casefold()
+                if name_ignore_case in self.settings:
+                    raise ValueError(f"setting '{setting.name}' already registered")
+                self.settings[name_ignore_case] = setting
         self.url: typing.Final = urllib.parse.urlunsplit(
             (parts.scheme, netloc, parts.path, parts.query, "")
         )
@@ -119,14 +134,67 @@ class OpenAPI:
         self.password: typing.Final = urllib.parse.unquote(parts.password or "")
         self.admin_password: typing.Final = args["password"]
         self.config: typing.Final = args.get("config")
-        self.filter: typing.Final = frozenset(args.get("filter", ()))
+        filter_names = list(args.get("filter", ()))
+        for name in filter_names:
+            if name.casefold() not in self.settings:
+                raise ValueError(f"filter '{name}' does not match any setting")
+        self.filter: typing.Final = frozenset(name.casefold() for name in filter_names)
         self.ssl_context: typing.Final = ssl_context
         self.auth_key: str | None = None
         self.lock_key: str | None = None
-        self._register_default_settings()
 
-    def _register_default_settings(self) -> None:
-        for simple_device_info_detail in (
+    @property
+    def browser_settings(self) -> typing.Iterable[OpenAPISetting]:
+        yield OpenAPISetting(
+            name="WebBrowser",
+            action="WebBrowser",
+            request_item=None,
+            element="EnableWebBrowser",
+        )
+        yield OpenAPISetting(
+            name="WebBrowserBookmark",
+            action="BrowserSetting",
+            request_item="Bookmark",
+            element="Bookmarklist",
+        )
+        for setting in ("Content", "Operation"):
+            yield OpenAPISetting(
+                name=f"WebBrowser{setting}",
+                action="BrowserSetting",
+                request_item=f"{setting}Setting",
+                element=f"{setting}Setting",
+            )
+
+    @property
+    def configuration_settings(self) -> typing.Iterable[OpenAPISetting]:
+        for kind in ("Public", "User"):
+            yield OpenAPISetting(
+                name=f"{kind}AbbrConfiguration",
+                action="AbbrConfiguration",
+                request_item=None,
+                element=("Abbr", "GroupAbbr"),
+                payload=f"<AddressKind>{kind}</AddressKind>",
+                readonly=True,
+            )
+        yield OpenAPISetting(
+            name="BoxConfiguration",
+            action="BoxConfiguration",
+            request_item=None,
+            element="BoxConfiguration",
+            readonly=True,
+        )
+        for setting in ("CopyProgram", "ProgramKey"):
+            yield OpenAPISetting(
+                name=f"{setting}Configuration",
+                action=f"{setting}Configuration",
+                request_item=None,
+                element=f"{setting}Info",
+                readonly=True,
+            )
+
+    @property
+    def device_info_detail_settings(self) -> typing.Iterable[OpenAPISetting]:
+        for simple_setting in (
             "AirPrint",
             "AppleTalk",
             "Bonjour",
@@ -161,15 +229,13 @@ class OpenAPI:
             "VLAN",
             "WindowsNetwork",
         ):
-            self.register_setting(
-                OpenAPISetting(
-                    name=simple_device_info_detail,
-                    action="DeviceInfoDetail",
-                    request_item=simple_device_info_detail,
-                    element=simple_device_info_detail,
-                )
+            yield OpenAPISetting(
+                name=simple_setting,
+                action="DeviceInfoDetail",
+                request_item=simple_setting,
+                element=simple_setting,
             )
-        for readonly_device_info_detail in (
+        for readonly_setting in (
             "FwRollback",
             "Marker",
             "MediaPath",
@@ -180,58 +246,60 @@ class OpenAPI:
             "Sensor",
             "Storage",
         ):
-            self.register_setting(
-                OpenAPISetting(
-                    name=readonly_device_info_detail,
-                    action="DeviceInfoDetail",
-                    request_item=readonly_device_info_detail,
-                    element=readonly_device_info_detail,
-                    readonly=True,
-                )
+            yield OpenAPISetting(
+                name=readonly_setting,
+                action="DeviceInfoDetail",
+                request_item=readonly_setting,
+                element=readonly_setting,
+                readonly=True,
             )
-        for setting_device_info_detail in (
+        for setting_with_element_suffix in (
             "Bmlinks",
             "CertificateVerification",
             "Ssdp",
             "WebDav",
             "WebService",
         ):
-            self.register_setting(
-                OpenAPISetting(
-                    name=setting_device_info_detail,
-                    action="DeviceInfoDetail",
-                    request_item=setting_device_info_detail,
-                    element=f"{setting_device_info_detail}Setting",
-                )
-            )
-        for readonly_list_device_info_detail in ("Consumable", "Version"):
-            self.register_setting(
-                OpenAPISetting(
-                    name=readonly_list_device_info_detail,
-                    action="DeviceInfoDetail",
-                    request_item=readonly_list_device_info_detail,
-                    element=f"{readonly_list_device_info_detail}List",
-                    readonly=True,
-                )
-            )
-        self.register_setting(
-            OpenAPISetting(
-                name="MarketArea",
+            yield OpenAPISetting(
+                name=setting_with_element_suffix,
                 action="DeviceInfoDetail",
-                request_item="MarketArea",
-                element="*",
+                request_item=setting_with_element_suffix,
+                element=f"{setting_with_element_suffix}Setting",
+            )
+        for readonly_list_setting in ("Consumable", "Version"):
+            yield OpenAPISetting(
+                name=readonly_list_setting,
+                action="DeviceInfoDetail",
+                request_item=readonly_list_setting,
+                element=f"{readonly_list_setting}List",
                 readonly=True,
             )
+        yield OpenAPISetting(
+            name="MarketArea",
+            action="DeviceInfoDetail",
+            request_item="MarketArea",
+            element=(
+                "GreekEnable",
+                "HebrewEnable",
+                "MarketArea",
+                "MarketArea2",
+                "FaxMarketArea",
+                "Fls",
+                "Type8K",
+                "Type16K",
+            ),
+            readonly=True,
         )
-        self.register_setting(
-            OpenAPISetting(
-                name="PhysicalInterface",
-                action="DeviceInfoDetail",
-                request_item="PhysicalInterface",
-                element="Physical",
-            )
+        yield OpenAPISetting(
+            name="PhysicalInterface",
+            action="DeviceInfoDetail",
+            request_item="PhysicalInterface",
+            element="Physical",
         )
-        for simple_device_permanent_setting in (
+
+    @property
+    def device_permanent_settings(self) -> typing.Iterable[OpenAPISetting]:
+        for simple_setting in (
             "AcquirePermission",
             "Admin",
             "AdminMyPanel",
@@ -271,130 +339,126 @@ class OpenAPI:
             "UbiquitousPrint",
             "WeeklyTimer",
         ):
-            self.register_setting(
-                OpenAPISetting(
-                    name=simple_device_permanent_setting,
-                    action="DevicePermanentSetting",
-                    request_item=simple_device_permanent_setting,
-                    element=simple_device_permanent_setting,
-                )
-            )
-        for duplicate_device_permanent_setting in ("Fax", "NetworkFax", "System"):
-            self.register_setting(
-                OpenAPISetting(
-                    name=f"{duplicate_device_permanent_setting}Setting",
-                    action="DevicePermanentSetting",
-                    request_item=duplicate_device_permanent_setting,
-                    element=duplicate_device_permanent_setting,
-                )
-            )
-        self.register_setting(
-            OpenAPISetting(
-                name="Authentication",
+            yield OpenAPISetting(
+                name=simple_setting,
                 action="DevicePermanentSetting",
-                request_item="Authentication",
-                element="AuthSetting",
+                request_item=simple_setting,
+                element=simple_setting,
             )
-        )
-        self.register_setting(
-            OpenAPISetting(
-                name="Tsi",
+        for duplicate_setting in ("Fax", "NetworkFax", "System"):
+            # we use Setting suffix to not clash with DeviceInfoDetail
+            yield OpenAPISetting(
+                name=f"{duplicate_setting}Setting",
                 action="DevicePermanentSetting",
-                request_item="Tsi",
-                element="TsiConfiguration",
+                request_item=duplicate_setting,
+                element=duplicate_setting,
             )
+        yield OpenAPISetting(
+            name="Authentication",
+            action="DevicePermanentSetting",
+            request_item="Authentication",
+            element="AuthSetting",
         )
-        self.register_setting(
-            OpenAPISetting(
-                name="Bookmark",
-                action="BrowserSetting",
-                request_item="Bookmark",
-                element="Bookmarklist",
-            )
+        yield OpenAPISetting(
+            name="Tsi",
+            action="DevicePermanentSetting",
+            request_item="Tsi",
+            element="TsiConfiguration",
         )
-        self.register_setting(
-            OpenAPISetting(
-                name="BrowserContent",
-                action="BrowserSetting",
-                request_item="ContentSetting",
-                element="ContentSetting",
-            )
+
+    @property
+    def other_settings(self) -> typing.Iterable[OpenAPISetting]:
+        yield OpenAPISetting(
+            name="CustomApplicationSetting",
+            action="CustomApplicationSetting",
+            request_item=None,
+            element=("ButtonName", "FaxDefaultApplication"),
         )
-        self.register_setting(
-            OpenAPISetting(
-                name="BrowserOperation",
-                action="BrowserSetting",
-                request_item="OperationSetting",
-                element="OperationSetting",
-            )
+        yield OpenAPISetting(
+            name="OpenApiAppSetting",
+            action="OpenapiAppSetting",
+            request_item=None,
+            element="OpenapiAppList",
+            payload="<ApplicationList>App</ApplicationList>",
         )
-        self.register_setting(
-            OpenAPISetting(
-                name="WebBrowser",
-                action="WebBrowser",
-                request_item=None,
-                element="EnableWebBrowser",
-            )
+        yield OpenAPISetting(
+            name="OpenApiAppGroupSetting",
+            action="OpenapiAppSetting",
+            request_item=None,
+            element="OpenapiAppGroupList",
+            payload="<ApplicationList>Group</ApplicationList>",
         )
-        self.register_setting(
-            OpenAPISetting(
-                name="PrinterEncryptionSetting",
-                action="PrinterEncryptionSetting",
-                request_item=None,
-                element="PrinterEncryptionSetting",
-            )
+        yield OpenAPISetting(
+            name="PanelPatternSetting",
+            action="PanelPatternSetting",
+            request_item=None,
+            element="PatternSetting",
         )
-        self.register_setting(
-            OpenAPISetting(
-                name="PanelPatternSetting",
-                action="PanelPatternSetting",
-                request_item=None,
-                element="PatternSetting",
-            )
+        yield OpenAPISetting(
+            name="PrinterEncryptionSetting",
+            action="PrinterEncryptionSetting",
+            request_item=None,
+            element="PrinterEncryptionSetting",
         )
-        self.register_setting(
-            OpenAPISetting(
-                name="CustomApplicationSetting",
-                action="CustomApplicationSetting",
-                request_item=None,
-                element=("ButtonName", "FaxDefaultApplication"),
-            )
-        )
-        self.register_setting(
-            OpenAPISetting(
-                name="BoxConfiguration",
-                action="BoxConfiguration",
-                request_item=None,
-                element="BoxConfiguration",
-                readonly=True,
-            )
-        )
-        for kind in ("Public", "User"):
-            self.register_setting(
-                OpenAPISetting(
-                    name=f"{kind}AbbrConfiguration",
-                    action="AbbrConfiguration",
-                    request_item=None,
-                    element=("Abbr", "GroupAbbr"),
-                    payload=f"<AddressKind>{kind}</AddressKind>",
-                    readonly=True,
-                )
-            )
 
     def enum_settings(self) -> typing.Iterable[OpenAPISetting]:
-        for setting in sorted(self._settings.values()):
-            if not self.filter or setting.name in self.filter:
+        for setting in sorted(self.settings.values()):
+            if not self.filter or setting.name.casefold() in self.filter:
                 yield setting
 
     def get_setting(self, name: str) -> OpenAPISetting | None:
-        if self.filter and name not in self.filter:
+        name_ignore_case = name.casefold()
+        if self.filter and name_ignore_case not in self.filter:
             return None
-        return self._settings.get(name)
+        return self.settings.get(name_ignore_case)
 
-    def register_setting(self, setting: OpenAPISetting) -> None:
-        if setting.name in self._settings:
-            raise ValueError(f"setting '{setting.name}' already registered")
-        self._settings[setting.name] = setting
+    def read_setting(self, setting: OpenAPISetting) -> xml.etree.ElementTree.Element:
+        element = xml.etree.ElementTree.Element(setting.name)
+        response = self.request(
+            f"Get{setting.action}",
+            request_item=setting.request_item,
+            payload=setting.payload,
+            include_backup=True,
+        )
+        if isinstance(setting.element, str):
+            matching = response.findall(setting.element)
+            if len(matching) != 1:
+                raise OpenAPIError(
+                    f"found {len(matching)} matching <{setting.element}>",
+                    response,
+                )
+            element.extend(matching[0])
+        else:
+            for name in setting.element:
+                matching = response.findall(name)
+                if len(matching) < 1:
+                    raise OpenAPIError(
+                        f"found no matching <{name}>",
+                        response,
+                    )
+                element.extend(matching)
+        return element
+
+    def write_setting(
+        self, setting: OpenAPISetting, element: xml.etree.ElementTree.Element
+    ) -> None:
+        if setting.readonly:
+            raise ValueError(f"setting '{setting.name}' is read-only")
+        if isinstance(setting.element, str):
+            clone = copy.deepcopy(element)
+            clone.tag = setting.element
+            payload = xml.etree.ElementTree.tostring(clone, encoding="unicode")
+        else:
+            payload = "".join(
+                xml.etree.ElementTree.tostring(child, encoding="unicode")
+                for child in element
+            )
+        self.request(
+            f"Set{setting.action}",
+            request_item=setting.request_item,
+            include_backup=True,
+            payload=payload + setting.payload,
+        )
 
     def read_config(self) -> xml.etree.ElementTree.Element:
         return xml.etree.ElementTree.fromstring(
@@ -480,7 +544,9 @@ class OpenAPI:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, context=self.ssl_context) as response:
+            with urllib.request.urlopen(
+                request, context=self.ssl_context, timeout=60
+            ) as response:
                 response_body = response.read()
         except urllib.error.HTTPError as error:
             error_body = error.read()
@@ -513,8 +579,7 @@ class OpenAPI:
         if result_node is None:
             raise OpenAPIError("Result missing in response", response_node)
         if result_node.findtext("ResultInfo") != "Ack":
-            raise OpenAPIError("response did not ack", result_node)
-        response_node.remove(result_node)
+            raise OpenAPIError("server did not ack", result_node)
         if request_item is not None:
             request_item_node = response_node.find("RequestItem")
             if request_item_node is None:
@@ -523,7 +588,6 @@ class OpenAPI:
                 raise OpenAPIError(
                     "server returned different request item", request_item_node
                 )
-            response_node.remove(request_item_node)
         return response_node
 
     @contextlib.contextmanager
@@ -541,8 +605,10 @@ class OpenAPI:
         try:
             yield
         finally:
-            self.request("Logout")
-            self.auth_key = None
+            try:
+                self.request("Logout")
+            finally:
+                self.auth_key = None
 
     @contextlib.contextmanager
     def lock(self) -> typing.Generator[None]:
@@ -559,5 +625,7 @@ class OpenAPI:
         try:
             yield
         finally:
-            self.request("ExitDeviceLock")
-            self.lock_key = None
+            try:
+                self.request("ExitDeviceLock")
+            finally:
+                self.lock_key = None

@@ -1,6 +1,5 @@
 import openapi
 import sys
-import xml.etree.ElementTree
 
 if __name__ == "__main__":
     api = openapi.OpenAPI(**openapi.parse_args())
@@ -12,25 +11,10 @@ if __name__ == "__main__":
                 if setting is None or setting.readonly:
                     continue
                 try:
-                    if not isinstance(setting.element, str) or setting.element == "*":
-                        payload = "".join(
-                            xml.etree.ElementTree.tostring(child, encoding="unicode")
-                            for child in element
-                        )
-                    else:
-                        element.tag = setting.element
-                        payload = xml.etree.ElementTree.tostring(
-                            element, encoding="unicode"
-                        )
-                    response = api.request(
-                        f"Set{setting.action}",
-                        request_item=setting.request_item,
-                        include_backup=True,
-                        payload=payload + setting.payload,
-                    )
+                    api.write_setting(setting, element)
                 except openapi.OpenAPIError as error:
                     print(
-                        f"Set{setting.action}_{setting.request_item}: {error}",
+                        f"{setting.name}: {error}",
                         file=sys.stderr,
                     )
                 else:
