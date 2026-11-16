@@ -13,10 +13,13 @@ import urllib.request
 import xml.etree.ElementTree
 from xml.sax.saxutils import escape
 
+DEFAULT_TIMEOUT = 60
 SOAP_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/"
 OPENAPI_VERSION_MAJOR = 7
 OPENAPI_VERSION_MINOR = 34
 OPENAPI_NAMESPACE = f"http://www.konicaminolta.com/service/OpenAPI-{OPENAPI_VERSION_MAJOR}-{OPENAPI_VERSION_MINOR}"
+OPENAPI_TIMEOUT_MAX = 60
+OPENAPI_TIMEOUT_MIN = 10
 
 
 class OpenAPIError(RuntimeError):
@@ -51,11 +54,12 @@ class OpenAPISetting:
 
 class OpenAPIArguments(typing.TypedDict):
     url: str
-    config: typing.NotRequired[pathlib.Path]
-    insecure: typing.NotRequired[bool]
-    filter: typing.NotRequired[typing.Iterable[str]]
     password: str
     additional_settings: typing.NotRequired[typing.Iterable[OpenAPISetting]]
+    config: typing.NotRequired[pathlib.Path]
+    filter: typing.NotRequired[typing.Iterable[str]]
+    insecure: typing.NotRequired[bool]
+    timeout: typing.NotRequired[int]
 
 
 def parse_args() -> OpenAPIArguments:
@@ -67,14 +71,19 @@ def parse_args() -> OpenAPIArguments:
         help="configuration XML file path (default: stdio)",
     )
     parser.add_argument(
+        "--filter",
+        nargs="+",
+        help="restrict handling to these settings (default: all)",
+    )
+    parser.add_argument(
         "--insecure",
         action="store_true",
         help="turn off SSL verification (default: on)",
     )
     parser.add_argument(
-        "--filter",
-        nargs="+",
-        help="settings to handle (default: all)",
+        "--timeout",
+        type=int,
+        help=f"timeout in seconds (min: {OPENAPI_TIMEOUT_MIN}, max: {OPENAPI_TIMEOUT_MAX}, default: {DEFAULT_TIMEOUT})",
     )
     parser.add_argument("--password", help="admin password (default: prompt)")
     args = parser.parse_args()
@@ -89,6 +98,8 @@ def parse_args() -> OpenAPIArguments:
         result["filter"] = frozenset(args.filter)
     if args.config is not None:
         result["config"] = args.config
+    if args.timeout is not None:
+        result["timeout"] = args.timeout
     return result
 
 
@@ -101,7 +112,7 @@ class OpenAPI:
         except ValueError as error:
             raise ValueError(f"OpenAPI URL is invalid: {error}") from error
         if parts.scheme not in {"http", "https"}:
-            raise ValueError(f"unsupported OpenAPI URL scheme: {parts.scheme}")
+            raise ValueError(f"unsupported OpenAPI URL scheme: '{parts.scheme}'")
         if hostname is None:
             raise ValueError("OpenAPI URL is missing a hostname")
         netloc = f"[{hostname}]" if ":" in hostname else hostname
@@ -113,8 +124,13 @@ class OpenAPI:
             ssl_context.verify_mode = ssl.CERT_NONE
         else:
             ssl_context = None
-        self.settings: typing.Final = dict[str, OpenAPISetting]()
-        for settings in (
+        timeout = args.get("timeout", DEFAULT_TIMEOUT)
+        if timeout < OPENAPI_TIMEOUT_MIN or OPENAPI_TIMEOUT_MAX < timeout:
+            raise ValueError(
+                f"timeout must be between {OPENAPI_TIMEOUT_MIN} and {OPENAPI_TIMEOUT_MAX}"
+            )
+        settings = dict[str, OpenAPISetting]()
+        for settings_to_register in (
             self.browser_settings,
             self.configuration_settings,
             self.device_info_detail_settings,
@@ -122,23 +138,25 @@ class OpenAPI:
             self.other_settings,
             args.get("additional_settings", ()),
         ):
-            for setting in settings:
+            for setting in settings_to_register:
                 name_ignore_case = setting.name.casefold()
-                if name_ignore_case in self.settings:
+                if name_ignore_case in settings:
                     raise ValueError(f"setting '{setting.name}' already registered")
-                self.settings[name_ignore_case] = setting
+                settings[name_ignore_case] = setting
+        filter_names = list(args.get("filter", ()))
+        for name in filter_names:
+            if name.casefold() not in settings:
+                raise ValueError(f"filter '{name}' does not match any setting")
+        self.admin_password: typing.Final = args["password"]
+        self.config: typing.Final = args.get("config")
+        self.filter: typing.Final = frozenset(name.casefold() for name in filter_names)
+        self.oap_password: typing.Final = urllib.parse.unquote(parts.password or "")
+        self.oap_username: typing.Final = urllib.parse.unquote(parts.username or "")
+        self.timeout: typing.Final = timeout
         self.url: typing.Final = urllib.parse.urlunsplit(
             (parts.scheme, netloc, parts.path, parts.query, "")
         )
-        self.username: typing.Final = urllib.parse.unquote(parts.username or "")
-        self.password: typing.Final = urllib.parse.unquote(parts.password or "")
-        self.admin_password: typing.Final = args["password"]
-        self.config: typing.Final = args.get("config")
-        filter_names = list(args.get("filter", ()))
-        for name in filter_names:
-            if name.casefold() not in self.settings:
-                raise ValueError(f"filter '{name}' does not match any setting")
-        self.filter: typing.Final = frozenset(name.casefold() for name in filter_names)
+        self.settings: typing.Final = settings
         self.ssl_context: typing.Final = ssl_context
         self.auth_key: str | None = None
         self.lock_key: str | None = None
@@ -514,8 +532,8 @@ class OpenAPI:
     <SOAP-ENV:Header>
         <me:AppReqHeader xmlns:me="http://www.konicaminolta.com/Header/OpenAPI-{OPENAPI_VERSION_MAJOR}-{OPENAPI_VERSION_MINOR}">
             <ApplicationID>{application_id}</ApplicationID>
-            <UserName>{escape(self.username)}</UserName>
-            <Password>{escape(self.password)}</Password>
+            <UserName>{escape(self.oap_username)}</UserName>
+            <Password>{escape(self.oap_password)}</Password>
             <Version>
                 <Major>{OPENAPI_VERSION_MAJOR}</Major>
                 <Minor>{OPENAPI_VERSION_MINOR}</Minor>
@@ -545,7 +563,7 @@ class OpenAPI:
         )
         try:
             with urllib.request.urlopen(
-                request, context=self.ssl_context, timeout=60
+                request, context=self.ssl_context, timeout=self.timeout
             ) as response:
                 response_body = response.read()
         except urllib.error.HTTPError as error:
@@ -563,6 +581,8 @@ class OpenAPI:
             ) from error
         except urllib.error.URLError as error:
             raise OpenAPIError(f"HTTP request failed: {error.reason}") from error
+        except TimeoutError as error:
+            raise OpenAPIError("HTTP request timed out") from error
         try:
             root = xml.etree.ElementTree.fromstring(response_body)
         except xml.etree.ElementTree.ParseError as error:
@@ -580,6 +600,7 @@ class OpenAPI:
             raise OpenAPIError("Result missing in response", response_node)
         if result_node.findtext("ResultInfo") != "Ack":
             raise OpenAPIError("server did not ack", result_node)
+        response_node.remove(result_node)
         if request_item is not None:
             request_item_node = response_node.find("RequestItem")
             if request_item_node is None:
@@ -588,6 +609,7 @@ class OpenAPI:
                 raise OpenAPIError(
                     "server returned different request item", request_item_node
                 )
+            response_node.remove(request_item_node)
         return response_node
 
     @contextlib.contextmanager
@@ -596,7 +618,7 @@ class OpenAPI:
             raise RuntimeError("OpenAPI already authenticated")
         response = self.request(
             "Login",
-            payload=f"<OperatorInfo><UserType>Admin</UserType><Password>{escape(self.admin_password)}</Password></OperatorInfo><TimeOut>60</TimeOut>",
+            payload=f"<OperatorInfo><UserType>Admin</UserType><Password>{escape(self.admin_password)}</Password></OperatorInfo><TimeOut>{self.timeout}</TimeOut>",
         )
         auth_key = response.findtext("AuthKey")
         if not auth_key:
@@ -616,7 +638,7 @@ class OpenAPI:
             raise RuntimeError("OpenAPI already locked")
         response = self.request(
             "EnterDeviceLock",
-            payload="<LockType>DownloadLock</LockType><PackageEntryFlg>Package</PackageEntryFlg><TimeOut>60</TimeOut>",
+            payload=f"<LockType>DownloadLock</LockType><PackageEntryFlg>Package</PackageEntryFlg><TimeOut>{self.timeout}</TimeOut>",
         )
         lock_key = response.findtext("LockKey")
         if not lock_key:
