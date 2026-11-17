@@ -474,22 +474,22 @@ class OpenAPI:
         self.request(
             f"Set{setting.action}",
             request_item=setting.request_item,
-            include_backup=True,
             payload=payload + setting.payload,
         )
 
     def read_config(self) -> xml.etree.ElementTree.Element:
         return xml.etree.ElementTree.fromstring(
-            sys.stdin.read() if self.config is None else self.config.read_bytes()
+            sys.stdin.buffer.read() if self.config is None else self.config.read_bytes()
         )
 
     def write_config(self, config: xml.etree.ElementTree.Element) -> None:
         result = xml.etree.ElementTree.tostring(
-            config, encoding="utf-8", xml_declaration=True
+            config,
+            encoding=sys.stdout.encoding if self.config is None else "utf-8",
+            xml_declaration=True,
         )
         if self.config is None:
             sys.stdout.buffer.write(result)
-            sys.stdout.buffer.write(b"\n")
         else:
             self.config.write_bytes(result)
 
